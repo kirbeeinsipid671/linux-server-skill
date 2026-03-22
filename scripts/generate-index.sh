@@ -363,11 +363,11 @@ scan_docker() {
 
   # All containers (including stopped)
   local all_containers_count
-  all_containers_count=$(docker ps -aq 2>/dev/null | wc -l || echo 0)
+  all_containers_count=$(docker ps -aq 2>/dev/null | wc -l | tr -d ' ')
 
   # Images
   local images_count images_size
-  images_count=$(docker images -q 2>/dev/null | wc -l || echo 0)
+  images_count=$(docker images -q 2>/dev/null | wc -l | tr -d ' ')
   images_size=$(docker system df --format '{{.Size}}' 2>/dev/null | head -1 || echo "?")
 
   # Compose projects (look in standard locations)
@@ -390,7 +390,7 @@ scan_docker() {
 
       # Check if project is running
       local compose_status
-      compose_status=$(docker compose -f "$compose_file" ps --quiet 2>/dev/null | wc -l || echo 0)
+      compose_status=$(docker compose -f "$compose_file" ps --quiet 2>/dev/null | wc -l | tr -d ' ')
 
       compose_projects+=("$(jq -n \
         --arg name "$proj_name" \
@@ -587,14 +587,14 @@ scan_waf() {
   # ModSecurity
   if command -v nginx &>/dev/null; then
     nginx -T 2>/dev/null | grep -q "modsecurity on" && modsec_enabled="true"
-    rate_limit_zones=$(nginx -T 2>/dev/null | grep -c "limit_req_zone" || echo 0)
+    rate_limit_zones=$(nginx -T 2>/dev/null | grep "limit_req_zone" | wc -l | tr -d ' ')
     nginx -T 2>/dev/null | grep -q "X-Frame-Options\|x-frame-options" && security_headers="true"
   fi
 
   # Nginx IP blocklist
   for bl in /etc/nginx/blocklist.conf /etc/nginx/conf.d/blocklist.conf; do
     if [ -f "$bl" ]; then
-      blocklist_entries=$(grep -c "^deny " "$bl" 2>/dev/null || echo 0)
+      blocklist_entries=$(grep "^deny " "$bl" 2>/dev/null | wc -l | tr -d ' ')
       break
     fi
   done
@@ -613,7 +613,7 @@ scan_waf() {
 
   # UFW rules count
   local ufw_rules=0
-  command -v ufw &>/dev/null && ufw_rules=$(ufw status numbered 2>/dev/null | grep -c "^\[" || echo 0)
+  command -v ufw &>/dev/null && ufw_rules=$(ufw status numbered 2>/dev/null | grep "^\[" | wc -l | tr -d ' ')
 
   jq -n \
     --arg modsec "$modsec_enabled" \
@@ -648,7 +648,7 @@ scan_users() {
     groups "$username" 2>/dev/null | grep -qE "\bsudo\b|\bwheel\b" && has_sudo="true"
     local ssh_keys=0
     [ -f "/home/$username/.ssh/authorized_keys" ] && \
-      ssh_keys=$(grep -c "^ssh" "/home/$username/.ssh/authorized_keys" 2>/dev/null || echo 0)
+      ssh_keys=$(grep "^ssh" "/home/$username/.ssh/authorized_keys" 2>/dev/null | wc -l | tr -d ' ')
     local last_login
     last_login=$(last -n 1 -w "$username" 2>/dev/null | head -1 | awk '{print $4, $5, $6, $7}' | xargs || echo "never")
 
@@ -727,7 +727,7 @@ scan_backups() {
   for dir in "${backup_dirs[@]}"; do
     [ -d "$dir" ] || continue
     local count size last_file last_modified
-    count=$(find "$dir" -maxdepth 2 -type f 2>/dev/null | wc -l)
+    count=$(find "$dir" -maxdepth 2 -type f 2>/dev/null | wc -l | tr -d ' ')
     size=$(du -sh "$dir" 2>/dev/null | awk '{print $1}' || echo "?")
     last_file=$(find "$dir" -maxdepth 2 -type f -printf '%T@ %p\n' 2>/dev/null \
       | sort -n | tail -1 | awk '{print $2}' || echo "")
