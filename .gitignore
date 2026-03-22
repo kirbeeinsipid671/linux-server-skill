@@ -1,0 +1,12 @@
+# Local workspace context files (contain SSH credentials)
+.server/servers.json
+.server/snapshots/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+*.swp
+*.swo
