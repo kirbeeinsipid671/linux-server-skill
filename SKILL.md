@@ -110,6 +110,140 @@ scp -i <key_path> -P <port> <user>@<host>:<remote_file> <local_path>
 
 ---
 
+## SSH Connection Failures — VPN / Proxy Interference
+
+When `ssh` hangs or refuses to connect, a local VPN or proxy (Clash Verge, V2Ray, sing-box, Shadowsocks, etc.) is a common culprit. **Run this diagnostic and fix sequence automatically whenever an SSH connection fails.**
+
+### Why it happens
+
+| Root cause | How it breaks SSH |
+|---|---|
+| TUN/TAP mode (Clash, V2Ray) routes all TCP | Server IP is sent through the VPN tunnel which then can't reach it |
+| `ALL_PROXY` / `SOCKS5_PROXY` env var set | Some SSH builds or `ProxyCommand` wrappers obey these |
+| `~/.ssh/config` has a `ProxyCommand` | Proxy process itself blocked by VPN routing |
+| System proxy + `nc`/`connect-proxy` in SSH config | Port 22 traffic hijacked |
+
+### Step-by-step Auto-Fix (macOS)
+
+```bash
+# ── 1. Quick connectivity test (5-second timeout) ─────────────────────────
+ssh -o ConnectTimeout=5 -o BatchMode=yes -i <key> -p <port> <user>@<host> 'echo OK' 2>&1
+# If this hangs/fails → proceed to Step 2
+
+# ── 2. Check active proxy env vars ───────────────────────────────────────
+env | grep -iE 'proxy|socks'
+# If ALL_PROXY, SOCKS5_PROXY, HTTPS_PROXY, etc. are set → they may interfere
+
+# ── 3. Try SSH with all proxy env vars cleared + ProxyCommand disabled ──
+env -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u HTTP_PROXY -u SOCKS_PROXY -u SOCKS5_PROXY \
+  ssh -o ProxyCommand=none -o ConnectTimeout=10 \
+  -i <key> -p <port> <user>@<host> 'echo OK'
+# If this succeeds → root cause is env-based proxy
+
+# ── 4. Detect TUN interface (Clash/V2Ray TUN mode) ───────────────────────
+ifconfig | grep -E 'utun[0-9]+|tun[0-9]+' | head -5
+# TUN interfaces present → traffic is routed through VPN
+
+# ── 5. Find current default gateway (before VPN hijacked it) ────────────
+GATEWAY=$(netstat -rn | awk '/^default/{print $2; exit}')
+echo "Gateway: $GATEWAY"
+
+# ── 6. Add a direct host route, bypassing TUN ───────────────────────────
+sudo route add -host <server_ip> "$GATEWAY"
+# Then retry SSH normally:
+ssh -i <key> -p <port> <user>@<host> 'echo OK'
+
+# ── 7. Remove the bypass route when done (optional) ─────────────────────
+sudo route delete -host <server_ip>
+```
+
+### One-liner bypass helper (paste into your shell)
+
+```bash
+# Usage: sshn <user@host> [port] [key_path]  — SSH ignoring all local proxies
+sshn() {
+  local target=$1 port=${2:-22} key=${3:-}
+  local gw
+  gw=$(netstat -rn | awk '/^default/{print $2; exit}')
+  local ip
+  ip=$(echo "$target" | awk -F@ '{print $2}')
+  # Add bypass route if a TUN interface is active
+  if ifconfig 2>/dev/null | grep -qE 'utun[0-9]+|^tun[0-9]+'; then
+    echo "[proxy-bypass] Adding direct route for $ip via $gw"
+    sudo route add -host "$ip" "$gw" 2>/dev/null
+  fi
+  env -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u HTTP_PROXY -u SOCKS_PROXY -u SOCKS5_PROXY \
+    ssh -o ProxyCommand=none -o ConnectTimeout=15 \
+    ${key:+-i "$key"} -p "$port" "$target"
+}
+```
+
+### Clash Verge / V2Ray — Exclude server IP from proxy rules
+
+The cleanest long-term fix is to add the server IP to Clash's bypass list so it is never proxied:
+
+1. Open **Clash Verge → Settings → System Proxy → Bypass domain/IP list**
+2. Add `<server_ip>` (or your server's CIDR, e.g. `103.0.0.0/8`)
+3. Or edit `~/.config/clash/config.yaml` (or Clash Verge profile):
+
+```yaml
+bypass:
+  - localhost
+  - 127.*
+  - 10.*
+  - 192.168.*
+  - <server_ip>        # ← add your server IP here
+```
+
+For V2Ray / sing-box, add a routing rule:
+
+```json
+{
+  "type": "route",
+  "rules": [
+    { "ip_cidr": ["<server_ip>/32"], "outbound": "direct" }
+  ]
+}
+```
+
+### Decision tree for quick diagnosis
+
+```
+SSH fails?
+├── env | grep -i proxy  → shows proxy vars?
+│   └── YES → use env -u ... ssh -o ProxyCommand=none ...
+│
+├── ifconfig shows utun*/tun* ?
+│   └── YES → add direct route: sudo route add -host <ip> <gateway>
+│
+├── ~/.ssh/config has ProxyCommand?
+│   └── YES → add -o ProxyCommand=none or comment it out for this host
+│
+└── Firewall/VPN blocking port 22?
+    └── Try alternate port: ssh -p 443 (if server listens on 443)
+        or set up Nginx stream proxy on 443 forwarding to sshd
+```
+
+### Automated retry wrapper (use in all SSH tool calls when connection fails)
+
+When an SSH command fails, **immediately retry** using this pattern before giving up:
+
+```bash
+# Attempt 1: normal
+ssh -o ConnectTimeout=8 -i <key> -p <port> <user>@<host> '<cmd>'
+
+# If exit code != 0 and elapsed < 3 seconds (hung/refused):
+# Attempt 2: proxy-bypassed
+GATEWAY=$(netstat -rn | awk '/^default/{print $2; exit}')
+SERVER_IP=<host>
+sudo route add -host "$SERVER_IP" "$GATEWAY" 2>/dev/null
+env -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u HTTP_PROXY -u SOCKS_PROXY \
+  ssh -o ProxyCommand=none -o ConnectTimeout=15 \
+  -i <key> -p <port> <user>@<host> '<cmd>'
+```
+
+---
+
 ## Step 1: Detect System
 
 ```bash
