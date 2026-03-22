@@ -112,134 +112,182 @@ scp -i <key_path> -P <port> <user>@<host>:<remote_file> <local_path>
 
 ## SSH Connection Failures — VPN / Proxy Interference
 
-When `ssh` hangs or refuses to connect, a local VPN or proxy (Clash Verge, V2Ray, sing-box, Shadowsocks, etc.) is a common culprit. **Run this diagnostic and fix sequence automatically whenever an SSH connection fails.**
+> **Core principle**: The server may only be reachable *through* the local proxy/VPN. SSH must go via the proxy when one is active — never blindly bypass it. Auto-detect the proxy state first, then build the SSH command accordingly.
 
-### Why it happens
+### Why SSH fails even when proxy is running
 
-| Root cause | How it breaks SSH |
-|---|---|
-| TUN/TAP mode (Clash, V2Ray) routes all TCP | Server IP is sent through the VPN tunnel which then can't reach it |
-| `ALL_PROXY` / `SOCKS5_PROXY` env var set | Some SSH builds or `ProxyCommand` wrappers obey these |
-| `~/.ssh/config` has a `ProxyCommand` | Proxy process itself blocked by VPN routing |
-| System proxy + `nc`/`connect-proxy` in SSH config | Port 22 traffic hijacked |
+| Scenario | What happens | Fix |
+|---|---|---|
+| Clash/V2Ray in **System Proxy** mode | Only HTTP/HTTPS are proxied. SSH (TCP port 22) is **not** automatically routed. | Add `ProxyCommand` using `nc -X 5 -x` to push SSH through SOCKS5 |
+| Clash/V2Ray in **TUN** mode | All TCP is routed through VPN — SSH should work; failure usually means DNS or routing loop | Use IP directly; ensure TUN default route is healthy |
+| Proxy process running but **not fully started** | Port not yet listening | Wait and retry |
+| No proxy / VPN active | Direct connection is the only option | Connect directly |
 
-### Step-by-step Auto-Fix (macOS)
-
-```bash
-# ── 1. Quick connectivity test (5-second timeout) ─────────────────────────
-ssh -o ConnectTimeout=5 -o BatchMode=yes -i <key> -p <port> <user>@<host> 'echo OK' 2>&1
-# If this hangs/fails → proceed to Step 2
-
-# ── 2. Check active proxy env vars ───────────────────────────────────────
-env | grep -iE 'proxy|socks'
-# If ALL_PROXY, SOCKS5_PROXY, HTTPS_PROXY, etc. are set → they may interfere
-
-# ── 3. Try SSH with all proxy env vars cleared + ProxyCommand disabled ──
-env -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u HTTP_PROXY -u SOCKS_PROXY -u SOCKS5_PROXY \
-  ssh -o ProxyCommand=none -o ConnectTimeout=10 \
-  -i <key> -p <port> <user>@<host> 'echo OK'
-# If this succeeds → root cause is env-based proxy
-
-# ── 4. Detect TUN interface (Clash/V2Ray TUN mode) ───────────────────────
-ifconfig | grep -E 'utun[0-9]+|tun[0-9]+' | head -5
-# TUN interfaces present → traffic is routed through VPN
-
-# ── 5. Find current default gateway (before VPN hijacked it) ────────────
-GATEWAY=$(netstat -rn | awk '/^default/{print $2; exit}')
-echo "Gateway: $GATEWAY"
-
-# ── 6. Add a direct host route, bypassing TUN ───────────────────────────
-sudo route add -host <server_ip> "$GATEWAY"
-# Then retry SSH normally:
-ssh -i <key> -p <port> <user>@<host> 'echo OK'
-
-# ── 7. Remove the bypass route when done (optional) ─────────────────────
-sudo route delete -host <server_ip>
-```
-
-### One-liner bypass helper (paste into your shell)
+### Auto-detect proxy state (run before every SSH attempt)
 
 ```bash
-# Usage: sshn <user@host> [port] [key_path]  — SSH ignoring all local proxies
-sshn() {
-  local target=$1 port=${2:-22} key=${3:-}
-  local gw
-  gw=$(netstat -rn | awk '/^default/{print $2; exit}')
-  local ip
-  ip=$(echo "$target" | awk -F@ '{print $2}')
-  # Add bypass route if a TUN interface is active
-  if ifconfig 2>/dev/null | grep -qE 'utun[0-9]+|^tun[0-9]+'; then
-    echo "[proxy-bypass] Adding direct route for $ip via $gw"
-    sudo route add -host "$ip" "$gw" 2>/dev/null
+# ── Detect active SOCKS5 / HTTP proxy ────────────────────────────────────
+detect_proxy() {
+  # 1. Explicit env vars (Clash Verge / V2Ray often set these)
+  local p="${ALL_PROXY:-${all_proxy:-${SOCKS5_PROXY:-${socks5_proxy:-}}}}"
+  [ -n "$p" ] && echo "$p" && return
+
+  # 2. macOS system SOCKS proxy (networksetup)
+  local iface
+  iface=$(networksetup -listnetworkserviceorder 2>/dev/null \
+    | awk -F'[()]' '/\(Hardware Port/{print $4; exit}')
+  iface="${iface:-Wi-Fi}"
+  local info
+  info=$(networksetup -getsocksfirewallproxy "$iface" 2>/dev/null)
+  if echo "$info" | grep -q "^Enabled: Yes"; then
+    local h port
+    h=$(echo "$info"    | awk '/^Server:/{print $2}')
+    port=$(echo "$info" | awk '/^Port:/{print $2}')
+    echo "socks5://$h:$port" && return
   fi
-  env -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u HTTP_PROXY -u SOCKS_PROXY -u SOCKS5_PROXY \
-    ssh -o ProxyCommand=none -o ConnectTimeout=15 \
-    ${key:+-i "$key"} -p "$port" "$target"
+
+  # 3. Probe common local proxy ports
+  for port in 7890 1080 10808 1086 7891; do
+    nc -z -w1 127.0.0.1 "$port" 2>/dev/null && echo "socks5://127.0.0.1:$port" && return
+  done
+
+  echo ""  # no proxy detected
+}
+
+# ── Detect TUN mode (all-traffic VPN) ────────────────────────────────────
+is_tun_active() {
+  # utun0-2 are macOS built-ins; utun3+ or tun* usually signal VPN TUN mode
+  ifconfig 2>/dev/null | grep -qE '^(utun[3-9]|utun[1-9][0-9]|tun[0-9])'
 }
 ```
 
-### Clash Verge / V2Ray — Exclude server IP from proxy rules
-
-The cleanest long-term fix is to add the server IP to Clash's bypass list so it is never proxied:
-
-1. Open **Clash Verge → Settings → System Proxy → Bypass domain/IP list**
-2. Add `<server_ip>` (or your server's CIDR, e.g. `103.0.0.0/8`)
-3. Or edit `~/.config/clash/config.yaml` (or Clash Verge profile):
-
-```yaml
-bypass:
-  - localhost
-  - 127.*
-  - 10.*
-  - 192.168.*
-  - <server_ip>        # ← add your server IP here
-```
-
-For V2Ray / sing-box, add a routing rule:
-
-```json
-{
-  "type": "route",
-  "rules": [
-    { "ip_cidr": ["<server_ip>/32"], "outbound": "direct" }
-  ]
-}
-```
-
-### Decision tree for quick diagnosis
-
-```
-SSH fails?
-├── env | grep -i proxy  → shows proxy vars?
-│   └── YES → use env -u ... ssh -o ProxyCommand=none ...
-│
-├── ifconfig shows utun*/tun* ?
-│   └── YES → add direct route: sudo route add -host <ip> <gateway>
-│
-├── ~/.ssh/config has ProxyCommand?
-│   └── YES → add -o ProxyCommand=none or comment it out for this host
-│
-└── Firewall/VPN blocking port 22?
-    └── Try alternate port: ssh -p 443 (if server listens on 443)
-        or set up Nginx stream proxy on 443 forwarding to sshd
-```
-
-### Automated retry wrapper (use in all SSH tool calls when connection fails)
-
-When an SSH command fails, **immediately retry** using this pattern before giving up:
+### Build SSH command based on detected state
 
 ```bash
-# Attempt 1: normal
-ssh -o ConnectTimeout=8 -i <key> -p <port> <user>@<host> '<cmd>'
+# ── Usage ─────────────────────────────────────────────────────────────────
+# PROXY=$(detect_proxy)
+# ssh $(ssh_proxy_args "$PROXY") -i <key> -p <port> <user>@<host> '<cmd>'
 
-# If exit code != 0 and elapsed < 3 seconds (hung/refused):
-# Attempt 2: proxy-bypassed
-GATEWAY=$(netstat -rn | awk '/^default/{print $2; exit}')
-SERVER_IP=<host>
-sudo route add -host "$SERVER_IP" "$GATEWAY" 2>/dev/null
-env -u ALL_PROXY -u all_proxy -u HTTPS_PROXY -u HTTP_PROXY -u SOCKS_PROXY \
-  ssh -o ProxyCommand=none -o ConnectTimeout=15 \
-  -i <key> -p <port> <user>@<host> '<cmd>'
+ssh_proxy_args() {
+  local proxy="$1"   # e.g. socks5://127.0.0.1:7890  or empty
+
+  if [ -n "$proxy" ]; then
+    # Extract host:port from socks5://host:port or http://host:port
+    local addr="${proxy#*://}"
+    local ph="${addr%:*}"
+    local pp="${addr##*:}"
+    # nc -X 5 = SOCKS5, -x = proxy address
+    echo "-o ProxyCommand='nc -X 5 -x ${ph}:${pp} %h %p' -o ConnectTimeout=15"
+  elif is_tun_active; then
+    # TUN routes everything — plain SSH, longer timeout for VPN latency
+    echo "-o ConnectTimeout=20"
+  else
+    # No proxy, no TUN — direct connection
+    echo "-o ConnectTimeout=10"
+  fi
+}
+```
+
+### Full retry wrapper — use this for EVERY SSH call
+
+When any SSH command fails, **automatically run this sequence** before giving up:
+
+```bash
+ssh_auto() {
+  # Args: same as ssh  (key, port, user@host, command are already expanded by caller)
+  local ssh_base_args="$@"
+
+  # ── Attempt 1: detect proxy & connect ────────────────────────────────
+  local PROXY
+  PROXY=$(detect_proxy)
+
+  if [ -n "$PROXY" ]; then
+    echo "[ssh-auto] Proxy detected: $PROXY — routing SSH through proxy"
+    local addr="${PROXY#*://}"; local ph="${addr%:*}"; local pp="${addr##*:}"
+    ssh -o "ProxyCommand=nc -X 5 -x ${ph}:${pp} %h %p" \
+        -o ConnectTimeout=15 $ssh_base_args
+  elif is_tun_active; then
+    echo "[ssh-auto] TUN mode detected — connecting directly (all traffic via VPN)"
+    ssh -o ConnectTimeout=20 $ssh_base_args
+  else
+    echo "[ssh-auto] No proxy/VPN — direct connection"
+    ssh -o ConnectTimeout=10 $ssh_base_args
+  fi
+
+  local rc=$?
+
+  # ── Attempt 2: if failed and proxy was detected, try TUN fallback ─────
+  if [ $rc -ne 0 ] && [ -n "$PROXY" ] && is_tun_active; then
+    echo "[ssh-auto] Proxy attempt failed; TUN is also active — retrying without ProxyCommand"
+    ssh -o ProxyCommand=none -o ConnectTimeout=20 $ssh_base_args
+    rc=$?
+  fi
+
+  # ── Attempt 3: if still failed and no proxy, probe ports and retry ───
+  if [ $rc -ne 0 ] && [ -z "$PROXY" ]; then
+    echo "[ssh-auto] Direct failed; probing proxy ports..."
+    for port in 7890 1080 10808 1086 7891; do
+      if nc -z -w1 127.0.0.1 "$port" 2>/dev/null; then
+        echo "[ssh-auto] Found proxy on port $port — retrying"
+        ssh -o "ProxyCommand=nc -X 5 -x 127.0.0.1:${port} %h %p" \
+            -o ConnectTimeout=15 $ssh_base_args
+        rc=$?
+        break
+      fi
+    done
+  fi
+
+  return $rc
+}
+```
+
+### Decision tree
+
+```
+SSH connection attempt
+│
+├─ detect_proxy() returns non-empty?
+│   └─ YES → SSH with ProxyCommand "nc -X 5 -x <proxy_host:port> %h %p"
+│             (SOCKS5 proxies the TCP connection — SSH traffic goes through VPN)
+│
+├─ is_tun_active() = true?
+│   └─ YES → Plain SSH (TUN already routes all TCP through VPN)
+│             If it fails: DNS issue? → pass server IP, not hostname
+│
+└─ Neither proxy nor TUN
+    └─ Plain direct SSH
+       If it fails: check firewall, server down, wrong port
+```
+
+### Common Clash Verge / V2Ray ports
+
+| Tool | Default SOCKS5 port | Default HTTP port |
+|---|---|---|
+| Clash Verge | 7890 | 7890 |
+| V2Ray / Xray | 10808 | 10809 |
+| sing-box | 1080 | 1080 |
+| Shadowsocks (macOS) | 1086 | 1087 |
+| Surge | 6153 (SOCKS5) | 6152 |
+
+### Troubleshooting checklist
+
+```bash
+# Is Clash/V2Ray running?
+pgrep -fl "clash\|v2ray\|xray\|sing-box\|shadowsocks" 
+
+# What proxy is macOS system proxy set to?
+networksetup -getsocksfirewallproxy Wi-Fi
+networksetup -getwebproxy Wi-Fi
+
+# Is the SOCKS5 port actually listening?
+nc -zv 127.0.0.1 7890
+
+# Does SSH work via proxy manually?
+ssh -o "ProxyCommand=nc -X 5 -x 127.0.0.1:7890 %h %p" \
+    -o ConnectTimeout=10 -i <key> -p <port> <user>@<host> 'echo OK'
+
+# TUN interfaces present?
+ifconfig | grep -E '^utun|^tun'
 ```
 
 ---
