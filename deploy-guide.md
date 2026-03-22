@@ -432,6 +432,134 @@ systemctl restart $NAME
 
 ---
 
+## Go Service
+
+**Full workflow:**
+
+```bash
+NAME="my-go-app"
+DOMAIN="go.example.com"
+PORT=8080
+REPO="https://github.com/user/app"
+GO_VERSION="1.22.0"   # adjust as needed
+
+# 1. Install Go
+curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+rm -rf /usr/local/go
+tar -C /usr/local -xzf /tmp/go.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile.d/go.sh
+export PATH=$PATH:/usr/local/go/bin
+go version
+
+# 2. Deploy
+mkdir -p /opt/go-apps/$NAME /var/log/apps/$NAME
+
+# Option A: clone + build on server
+git clone $REPO /opt/go-apps/$NAME/src
+cd /opt/go-apps/$NAME/src
+go build -o /opt/go-apps/$NAME/$NAME ./...
+
+# Option B: upload pre-built binary (recommended for prod)
+rsync -avz -e "ssh -i <key>" ./bin/$NAME user@host:/opt/go-apps/$NAME/
+chmod +x /opt/go-apps/$NAME/$NAME
+
+# 3. Environment file
+cat > /opt/go-apps/$NAME/.env << 'ENV'
+PORT=8080
+GIN_MODE=release
+ENV
+chmod 600 /opt/go-apps/$NAME/.env
+
+# 4. Create dedicated service user
+useradd -r -s /bin/false -d /opt/go-apps/$NAME goapp-$NAME 2>/dev/null || true
+chown -R goapp-$NAME:goapp-$NAME /opt/go-apps/$NAME /var/log/apps/$NAME
+
+# 5. Systemd service unit
+cat > /etc/systemd/system/$NAME.service << UNIT
+[Unit]
+Description=$NAME Go Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=goapp-$NAME
+WorkingDirectory=/opt/go-apps/$NAME
+EnvironmentFile=/opt/go-apps/$NAME/.env
+ExecStart=/opt/go-apps/$NAME/$NAME
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+StandardOutput=append:/var/log/apps/$NAME/app.log
+StandardError=append:/var/log/apps/$NAME/error.log
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# 6. Enable + start (auto-starts on every boot)
+systemctl daemon-reload
+systemctl enable $NAME        # ← register for auto-start on boot
+systemctl start $NAME
+systemctl status $NAME --no-pager
+
+# 7. Nginx reverse proxy (use upstream template at top of file)
+cat > /etc/nginx/sites-available/$NAME << NGINX
+upstream ${NAME}_backend {
+    server 127.0.0.1:$PORT;
+    keepalive 32;
+}
+server {
+    listen 80;
+    server_name $DOMAIN www.$DOMAIN;
+    access_log /var/log/nginx/$NAME-access.log;
+    error_log  /var/log/nginx/$NAME-error.log;
+    client_max_body_size 50M;
+    location / {
+        proxy_pass         http://${NAME}_backend;
+        proxy_http_version 1.1;
+        proxy_set_header   Host \$host;
+        proxy_set_header   X-Real-IP \$remote_addr;
+        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 300s;
+    }
+}
+NGINX
+ln -sf /etc/nginx/sites-available/$NAME /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+
+# 8. SSL
+certbot --nginx -d $DOMAIN --non-interactive --agree-tos \
+  --email admin@$DOMAIN --redirect
+
+# 9. Registry
+bash /opt/server-tools/service-registry.sh set $NAME \
+  "{\"type\":\"go\",\"domain\":\"$DOMAIN\",\"root\":\"/opt/go-apps/$NAME\",\"port\":$PORT,\"process_manager\":\"systemd\"}"
+```
+
+**Update (zero-downtime via binary swap):**
+
+```bash
+# Upload new binary
+rsync -avz -e "ssh -i <key>" ./bin/$NAME user@host:/opt/go-apps/$NAME/$NAME.new
+# Swap atomically + reload
+ssh user@host "mv /opt/go-apps/$NAME/$NAME.new /opt/go-apps/$NAME/$NAME && systemctl reload $NAME || systemctl restart $NAME"
+```
+
+**Or rebuild on server:**
+
+```bash
+cd /opt/go-apps/$NAME/src && git pull
+go build -o /opt/go-apps/$NAME/$NAME ./...
+systemctl restart $NAME
+```
+
+---
+
 ## PHP Service (Laravel / WordPress / Custom)
 
 **Full workflow:**
@@ -943,6 +1071,165 @@ services:
       - ./data:/app/data
     ports:
       - "127.0.0.1:3001:3001"
+```
+
+---
+
+---
+
+## Auto-Start on Boot — Complete Reference
+
+Every service type must survive a server reboot. Here is the canonical command for each type and how to verify.
+
+### Enable Auto-Start (by service type)
+
+| Type | Enable Command | Verify |
+|------|---------------|--------|
+| **Nginx** | `systemctl enable nginx` | `systemctl is-enabled nginx` |
+| **Node.js (PM2)** | `pm2 startup` → run printed cmd → `pm2 save` | `pm2 list` after reboot |
+| **Java** | `systemctl enable <name>` | `systemctl is-enabled <name>` |
+| **Python** | `systemctl enable <name>` | `systemctl is-enabled <name>` |
+| **Go** | `systemctl enable <name>` | `systemctl is-enabled <name>` |
+| **PHP-FPM** | `systemctl enable php<ver>-fpm` | `systemctl is-enabled php<ver>-fpm` |
+| **MySQL** | `systemctl enable mysql` | `systemctl is-enabled mysql` |
+| **PostgreSQL** | `systemctl enable postgresql` | `systemctl is-enabled postgresql` |
+| **Redis** | `systemctl enable redis` | `systemctl is-enabled redis` |
+| **Docker** | `systemctl enable docker` | `systemctl is-enabled docker` |
+| **Docker Compose** | Set `restart: unless-stopped` in compose.yml | `docker inspect <c> --format '{{.HostConfig.RestartPolicy.Name}}'` |
+| **fail2ban** | `systemctl enable fail2ban` | `systemctl is-enabled fail2ban` |
+
+### PM2 Auto-Start (Node.js) — Full Steps
+
+```bash
+# 1. Generate and run the startup hook (run as the user who owns PM2)
+pm2 startup
+# It prints a command like: sudo env PATH=... pm2 startup systemd -u ubuntu --hp /home/ubuntu
+# Copy and run that exact command, then:
+
+# 2. Save current process list (MUST do this after every pm2 start/delete)
+pm2 save
+
+# 3. Verify
+pm2 list                                 # check processes are online
+systemctl status pm2-ubuntu              # pm2 systemd unit (replace 'ubuntu' with your user)
+systemctl is-enabled pm2-ubuntu          # should print 'enabled'
+
+# 4. Test: simulate reboot without rebooting
+pm2 kill                                 # stop all PM2 processes
+pm2 resurrect                            # restore from saved list
+pm2 list                                 # should be back online
+```
+
+### Docker Compose Auto-Start
+
+Add `restart: unless-stopped` (or `restart: always`) to every service in `docker-compose.yml`:
+
+```yaml
+services:
+  app:
+    image: my-image:latest
+    restart: unless-stopped   # ← auto-restart on crash AND after reboot
+```
+
+Difference:
+- `unless-stopped` — restarts automatically UNLESS you manually `docker stop` it
+- `always` — restarts even if you manually stopped it (useful for daemons)
+- `on-failure` — only restarts on non-zero exit (useful for one-shot tasks)
+
+### Verify All Auto-Starts at Once
+
+```bash
+bash /opt/server-tools/service-control.sh boot-check
+```
+
+Or manually:
+
+```bash
+echo "=== Auto-start enabled services ==="
+systemctl list-unit-files --type=service --state=enabled --no-pager | grep -v "^UNIT\|^$"
+echo ""
+echo "=== PM2 startup ==="
+pm2 list 2>/dev/null && systemctl is-enabled "pm2-$(whoami)" 2>/dev/null || echo "PM2 startup not configured"
+echo ""
+echo "=== Docker restart policies ==="
+docker ps --format "{{.Names}}: {{.Status}}" 2>/dev/null
+docker inspect $(docker ps -q) --format '{{.Name}}: restart={{.HostConfig.RestartPolicy.Name}}' 2>/dev/null
+```
+
+---
+
+## Service Control — Status, Start, Stop, Restart
+
+Use `service-control.sh` (installed at `/opt/server-tools/service-control.sh`) for unified management of all service types.
+
+### Quick Commands
+
+```bash
+# ── Status ──────────────────────────────────────────────────────
+# All services overview
+bash /opt/server-tools/service-control.sh status
+
+# Specific service
+bash /opt/server-tools/service-control.sh status <name>
+
+# ── Start ───────────────────────────────────────────────────────
+bash /opt/server-tools/service-control.sh start <name>
+
+# ── Stop ────────────────────────────────────────────────────────
+bash /opt/server-tools/service-control.sh stop <name>
+
+# ── Restart ─────────────────────────────────────────────────────
+bash /opt/server-tools/service-control.sh restart <name>
+
+# ── Reload (graceful, zero-downtime where supported) ────────────
+bash /opt/server-tools/service-control.sh reload <name>
+
+# ── Boot check (verify all auto-start) ─────────────────────────
+bash /opt/server-tools/service-control.sh boot-check
+
+# ── Logs ────────────────────────────────────────────────────────
+bash /opt/server-tools/service-control.sh logs <name>
+```
+
+### Per-Type Native Commands
+
+```bash
+# ── Node.js (PM2) ───────────────────────────────────────────────
+pm2 status                          # all apps + CPU/memory
+pm2 status <name>                   # single app
+pm2 restart <name>                  # hard restart
+pm2 reload <name>                   # graceful (0 downtime, cluster mode)
+pm2 stop <name>
+pm2 start <name>
+pm2 logs <name> --lines 100
+
+# ── Java / Python / Go (systemd) ────────────────────────────────
+systemctl status <name> --no-pager -l
+systemctl restart <name>
+systemctl reload <name>             # if app supports SIGHUP
+systemctl stop <name>
+systemctl start <name>
+journalctl -u <name> -f --no-pager
+
+# ── Nginx ───────────────────────────────────────────────────────
+nginx -t                            # test config before reload
+systemctl reload nginx              # graceful reload (no downtime)
+systemctl restart nginx             # full restart (brief downtime)
+systemctl status nginx --no-pager
+
+# ── PHP-FPM ─────────────────────────────────────────────────────
+systemctl reload php8.2-fpm         # graceful
+systemctl restart php8.2-fpm
+systemctl status php8.2-fpm --no-pager
+
+# ── Docker Compose ──────────────────────────────────────────────
+cd /opt/docker-apps/<name>
+docker compose ps                   # status
+docker compose restart              # restart all services
+docker compose restart <service>    # restart single service
+docker compose up -d                # start (or recreate changed)
+docker compose stop
+docker compose logs -f --tail=100
 ```
 
 ---

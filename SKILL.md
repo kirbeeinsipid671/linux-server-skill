@@ -1,6 +1,6 @@
 ---
 name: linux-server-ops
-description: Manage, deploy, and monitor Linux servers via SSH. Like a BaoTa/1Panel but AI-driven. Covers websites, Node.js/Java/Python/PHP services, MySQL/PostgreSQL/Redis databases, Docker containers and Compose stacks, SSL certificates (auto-issue + auto-renew), domain binding, Nginx management, cron jobs, firewall, system monitoring, and backups. Maintains a server-side index and a local workspace context file for instant session resumption. Use when the user asks to deploy a website or service, manage a Linux server, set up SSL, configure databases, manage Docker, monitor resources, check server status, or resume work on a previously configured server.
+description: Manage, deploy, and monitor Linux servers via SSH. Like a BaoTa/1Panel but AI-driven. Covers websites, Node.js/Java/Python/Go/PHP services, MySQL/PostgreSQL/Redis databases, Docker containers and Compose stacks, SSL certificates (auto-issue + auto-renew), domain binding, Nginx management, WAF (ModSecurity+OWASP), cron jobs, firewall, log management, file operations, user management, system monitoring, and backups. All services auto-start on boot. Maintains a server-side index and local workspace snapshots for instant session resumption. Use when the user asks to deploy a website or service, manage a Linux server, set up SSL, configure databases, manage Docker, check service status, restart a service, monitor resources, or resume work on a previously configured server.
 ---
 
 # Linux Server Operations
@@ -251,14 +251,15 @@ See [deploy-guide.md](deploy-guide.md) for complete per-type workflows.
 
 ### Service Type Quick Reference
 
-| Type    | Process Manager | App Root                  | Default Port |
-|---------|----------------|--------------------------|-------------|
-| Static  | nginx           | /var/www/\<name\>          | 80/443      |
-| Node.js | pm2             | /var/www/\<name\>          | as defined  |
-| Java    | systemd         | /opt/java-apps/\<name\>    | 8080        |
-| Python  | systemd+gunicorn| /opt/python-apps/\<name\>  | 8000        |
-| PHP     | php-fpm + nginx | /var/www/\<name\>          | 80/443      |
-| Docker  | docker compose  | /opt/docker-apps/\<name\>  | as mapped   |
+| Type    | Process Manager | App Root                  | Default Port | Auto-Start |
+|---------|----------------|--------------------------|-------------|------------|
+| Static  | nginx           | /var/www/\<name\>          | 80/443      | `systemctl enable nginx` |
+| Node.js | pm2             | /var/www/\<name\>          | as defined  | `pm2 startup` + `pm2 save` |
+| Java    | systemd         | /opt/java-apps/\<name\>    | 8080        | `systemctl enable <name>` |
+| Python  | systemd+gunicorn| /opt/python-apps/\<name\>  | 8000        | `systemctl enable <name>` |
+| Go      | systemd         | /opt/go-apps/\<name\>      | 8080        | `systemctl enable <name>` |
+| PHP     | php-fpm + nginx | /var/www/\<name\>          | 80/443      | `systemctl enable php<v>-fpm` |
+| Docker  | docker compose  | /opt/docker-apps/\<name\>  | as mapped   | `restart: unless-stopped` |
 
 ### Standard Directories
 
@@ -342,6 +343,54 @@ ssh -i <key> user@host "docker compose -f /opt/docker-apps/<name>/docker-compose
 
 # Cleanup
 ssh -i <key> user@host 'docker system prune -f'
+```
+
+---
+
+## Step 7.5: Service Control (Status / Start / Stop / Restart)
+
+Use `service-control.sh` — it auto-detects the service type (PM2 / systemd / Docker Compose / Nginx) and runs the right command.
+
+```bash
+# ── Status ──────────────────────────────────────────────────────────────────
+# All services at a glance (status + boot auto-start flag)
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh status'
+
+# One specific service
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh status <name>'
+
+# ── Start / Stop / Restart / Reload ─────────────────────────────────────────
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh start   <name>'
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh stop    <name>'
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh restart <name>'
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh reload  <name>'  # zero-downtime
+
+# ── Auto-Start on Boot ───────────────────────────────────────────────────────
+# Check all services have boot auto-start configured
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh boot-check'
+# Fix all: enable auto-start for every detected service
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh boot-fix'
+# Enable one service
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh enable <name>'
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+ssh -i <key> user@host 'bash /opt/server-tools/service-control.sh logs <name> 200'
+```
+
+**How reload vs restart works per type:**
+
+| Type | `reload` | `restart` |
+|------|---------|----------|
+| PM2 (Node.js) | Graceful cluster reload — 0 downtime | Hard restart, brief gap |
+| systemd (Java/Python/Go) | SIGHUP (if app supports it), else falls back to restart | Full process restart |
+| Nginx | Config reload — 0 downtime | Full restart |
+| Docker Compose | Falls back to restart | Recreate containers |
+
+**Install `service-control.sh` on server (first time):**
+
+```bash
+scp -i <key> ~/.cursor/skills/linux-server-ops/scripts/service-control.sh user@host:/tmp/
+ssh -i <key> user@host 'sudo mv /tmp/service-control.sh /opt/server-tools/ && sudo chmod +x /opt/server-tools/service-control.sh'
 ```
 
 ---
@@ -571,4 +620,5 @@ See [security-guide.md](security-guide.md) and [waf-guide.md](waf-guide.md) for 
 | [scripts/check-system.sh](scripts/check-system.sh) | Bootstrap a new server from scratch |
 | [scripts/generate-index.sh](scripts/generate-index.sh) | Full server scan → `/etc/server-index.json` |
 | [scripts/service-registry.sh](scripts/service-registry.sh) | Manage server index + health/db/docker/cron commands |
+| [scripts/service-control.sh](scripts/service-control.sh) | Unified start/stop/restart/reload/enable/boot-check for all service types |
 | [scripts/sync-context.sh](scripts/sync-context.sh) | Sync server state to local `.server/snapshots/` |

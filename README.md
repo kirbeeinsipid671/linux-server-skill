@@ -6,7 +6,7 @@ An AI agent skill that turns your coding assistant into a full-featured Linux se
 
 | Category | Capabilities |
 |----------|-------------|
-| **Deploy** | Static sites, Node.js (PM2), Java (systemd), Python (Gunicorn/Uvicorn), PHP (FPM), Docker Compose |
+| **Deploy** | Static sites, Node.js (PM2), Java (systemd), Python (Gunicorn/Uvicorn), Go (systemd), PHP (FPM), Docker Compose |
 | **Domain & SSL** | Nginx vhost generation, Let's Encrypt auto-issue & auto-renew, wildcard certs |
 | **Databases** | MySQL/MariaDB, PostgreSQL, Redis, MongoDB — create, manage, backup |
 | **Docker** | Containers, Compose stacks, registry, image management |
@@ -274,6 +274,14 @@ bash ~/.cursor/skills/linux-server-ops/scripts/sync-context.sh staging
 | `service-registry.sh cron` | All scheduled jobs |
 | `service-registry.sh summary` | Full server summary |
 | `service-registry.sh set <name> '{...}'` | Add/update a service entry |
+| `service-control.sh status [name]` | Show status of all services or one specific service |
+| `service-control.sh restart <name>` | Hard restart any service (auto-detects type) |
+| `service-control.sh reload <name>` | Graceful zero-downtime reload |
+| `service-control.sh start/stop <name>` | Start or stop a service |
+| `service-control.sh enable <name>` | Enable auto-start on boot |
+| `service-control.sh boot-check` | Verify ALL services have auto-start configured |
+| `service-control.sh boot-fix` | Enable auto-start for all detected services |
+| `service-control.sh logs <name> [n]` | View last N log lines |
 
 ---
 
