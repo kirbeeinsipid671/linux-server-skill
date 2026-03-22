@@ -40,12 +40,9 @@ mask_ip() {
   printf '%s' "$1" | sed 's/\([0-9]*\.[0-9]*\)\.[0-9]*\.[0-9]*/\1.*.*/'
 }
 
-# mask_key: show only filename of a key path, never the full path
-#   /Users/ming/Downloads/aaa.pem → ~/.../aaa.pem
+# mask_key: never reveal any part of the key path
 mask_key() {
-  local f
-  f=$(basename "$1" 2>/dev/null || printf '%s' "$1")
-  printf '~/.../\%s' "$f"
+  printf '[key configured]'
 }
 
 # Runtime password (never stored in files)
